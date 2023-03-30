@@ -226,7 +226,7 @@ async def photo_handler(message: Message):
     keyboard.row(InlineKeyboardButton("Забанить", callback_data=f"{message.from_user.id} ban"))
 
     if len(cooler.sent_messages) != 0:
-        for i, j in enumerate(cooler.sent_messages):
+        for i, j in cooler.sent_messages:
             try:
                 await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=keyboard)
             except ApiTelegramException as e:
