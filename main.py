@@ -10,8 +10,6 @@ from pymotyc.errors import NotFound
 # noinspection PyPackageRequirements
 from telebot.async_telebot import AsyncTeleBot
 # noinspection PyPackageRequirements
-from telebot.asyncio_handler_backends import BaseMiddleware
-# noinspection PyPackageRequirements
 from telebot.asyncio_helper import ApiTelegramException
 # noinspection PyPackageRequirements
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
@@ -20,33 +18,18 @@ from telebot.util import extract_arguments, antiflood
 
 from database import Database
 from database.models import User, Event
-from utils.self_cleaning_dict import SelfCleaningDict
+from utils import SelfCleaningDict
+from utils.middlewares import RegisterMiddleware, HandleBannedMiddleware
 
+# Создание клиентов для БД и телеги
 bot = AsyncTeleBot(environ.get("TELEBOT_TOKEN", ""))
 client = AsyncIOMotorClient(environ.get("DATABASE_URL", ""))
 
-codes = SelfCleaningDict(3600, 3600)
-admins_actions = {}
+messages_to_reply_photo = SelfCleaningDict(3600, 3600)  # Самоочищающийся словарь для хранения типа отсутствия в диалоге
+admins_actions = {}  # Словарь для хранения действий с админами для чатов
 
-
-# Middleware to register user
-class Middleware(BaseMiddleware):
-    def __init__(self):
-        super().__init__()
-        self.update_sensitive = False
-        self.update_types = ['message']
-
-    async def pre_process(self, message, data):
-        user = await Database.users.find({"telegram_id": message.from_user.id})
-        if not user:
-            user = User(telegram_id=message.from_user.id, name=message.from_user.first_name)
-            await Database.users.save(user)
-
-    async def post_process(self, message, data, exception):
-        pass
-
-
-bot.setup_middleware(Middleware())
+bot.setup_middleware(RegisterMiddleware())  # Настройка промежуточного шлюза для регистрации пользователей
+bot.setup_middleware(HandleBannedMiddleware(bot))  # Настройка промежуточного шлюза для проверки бана
 
 
 @bot.message_handler(commands=["ban"])
@@ -59,6 +42,9 @@ async def handle_ban(message: Message):
         return
     uid = extract_arguments(message.text)
     if not uid:
+        await bot.reply_to(message, "Использование: /ban id")
+        return
+    if not uid.isdigit():
         await bot.reply_to(message, "Использование: /ban id")
         return
     user_to_ban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
@@ -82,6 +68,9 @@ async def handle_unban(message: Message):
     if not uid:
         await bot.reply_to(message, "Использование: /unban id")
         return
+    if not uid.isdigit():
+        await bot.reply_to(message, "Использование: /ban id")
+        return
     user_to_unban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
     if not user_to_unban:
         await bot.reply_to(message, "Пользователь не найден")
@@ -103,21 +92,22 @@ async def handle_unban(message: Message):
     if s:
         s = s.split()
         if len(s) == 2:
-            user = await Database.users.find({"telegram_id": int(s[0])}, inject_default_id=True)
-            if user and s[1].lower() == "true":
-                user = user[0]
-                user.admin = True
-                user.send_notif = True
-                await Database.users.save(user)
-                await bot.reply_to(message, "Админ добавлен")
-                return
-            if user and s[1].lower() == "false":
-                user = user[0]
-                user.admin = False
-                user.send_notif = False
-                await Database.users.save(user)
-                await bot.reply_to(message, "Админ удален")
-                return
+            if s[0].isdigit():
+                user = await Database.users.find({"telegram_id": int(s[0])}, inject_default_id=True)
+                if user:
+                    user = user[0]
+                    if s[1].lower() == "true":
+                        user.admin = True
+                        user.send_notif = True
+                        await Database.users.save(user)
+                        await bot.reply_to(message, "Админ добавлен")
+                        return
+                    if s[1].lower() == "false":
+                        user.admin = False
+                        user.send_notif = False
+                        await Database.users.save(user)
+                        await bot.reply_to(message, "Админ удален")
+                        return
         if len(s) == 1:
             if s[0].lower() in ["true", "false"]:
                 await bot.reply_to(message, "Перешлите сообщение от пользователя")
@@ -149,6 +139,7 @@ async def handle_forwarded(message: Message):
     else:
         user_to_edit.admin = False
         user_to_edit.send_notif = False
+    del admins_actions[message.from_user.id]
     await Database.users.save(user_to_edit)
     await bot.reply_to(message, f"Изменения произведены\nId пользователя: {message.forward_from.id}")
 
@@ -163,9 +154,6 @@ async def handle_start(message: Message):
             return
         try:
             cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
-            if not cooler:
-                await bot.reply_to(message, "Отсканируйте qr-код на кулере")
-                return
         except (InvalidId, NotFound):
             await bot.reply_to(message, "Отсканируйте qr-код на кулере")
             return
@@ -196,19 +184,16 @@ async def photo_handler(message: Message):
         await bot.reply_to(message, "Вы находитесь в черном списке")
         return
     if message.photo and message.reply_to_message:
+        messages_to_reply_photo.prone()
         try:
-            codes.prone()
-            uid, status = codes[message.reply_to_message.id]
-            del codes[message.reply_to_message.id]
+            uid, status = messages_to_reply_photo[message.reply_to_message.id]
+            del messages_to_reply_photo[message.reply_to_message.id]
         except KeyError:
             await bot.reply_to(message, "Попробуйте отсканировать код еще раз")
             return
 
         try:
             cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
-            if not cooler:
-                await bot.reply_to(message, "Отсканируйте qr-код на кулере")
-                return
         except (InvalidId, NotFound):
             await bot.reply_to(message, "Отсканируйте qr-код на кулере")
             return
@@ -217,14 +202,23 @@ async def photo_handler(message: Message):
 
         match status:
             case "no_water":
+                if cooler.empty_watter:
+                    await bot.reply_to(message, "Обращение уже зарегистрировано")
+                    return
                 m = "Закончилась вода в кулере: "
                 cooler.empty_watter = True
                 keyboard.row(InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water"))
             case "no_glass":
+                if cooler.empty_glass:
+                    await bot.reply_to(message, "Обращение уже зарегистрировано")
+                    return
                 m = "Закончились стаканчики в кулере: "
                 cooler.empty_glass = True
                 keyboard.row(InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"))
             case "no_all":
+                if cooler.empty_watter and cooler.empty_glass:
+                    await bot.reply_to(message, "Обращение уже зарегистрировано")
+                    return
                 m = "Закончились стаканчики и вода в кулере: "
                 cooler.empty_glass = True
                 cooler.empty_watter = True
@@ -248,8 +242,12 @@ async def photo_handler(message: Message):
         keyboard.row(InlineKeyboardButton("Забанить", callback_data=f"{message.from_user.id} ban"))
 
         if len(cooler.sent_messages) != 0:
-            for i, j in cooler.sent_messages:
-                await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=keyboard)
+            for i, j in enumerate(cooler.sent_messages):
+                try:
+                    await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=keyboard)
+                except ApiTelegramException as e:
+                    print(e)
+                    del cooler.sent_messages[cooler.sent_messages.index([i, j])]
 
         for i in await Database.users.find({"send_notif": True}, inject_default_id=True):
             try:
@@ -259,7 +257,6 @@ async def photo_handler(message: Message):
                 print(e)
                 i.send_notif = False
                 await Database.users.save(i)
-                continue
 
         await Database.coolers.save(cooler)
         await Database.events.save(Event(type=status, from_id=message.from_user.id,
@@ -269,7 +266,7 @@ async def photo_handler(message: Message):
 
 
 @bot.callback_query_handler(lambda query: query.message is not None)
-async def handle_empty_select(query: CallbackQuery):
+async def handle_inline_keyboard(query: CallbackQuery):
     user = await Database.users.find_one({"telegram_id": query.message.chat.id}, inject_default_id=True)
     if user.banned:
         await bot.answer_callback_query(query.id, "Вы находитесь в черном списке")
@@ -283,22 +280,23 @@ async def handle_empty_select(query: CallbackQuery):
             try:
                 await Database.coolers.find_one(_id=uid, inject_default_id=True)
             except (InvalidId, NotFound):
-                await bot.send_message(query.message.chat.id, "Отсканируйте qr-код на кулере")
-                await bot.answer_callback_query(query.id)
+                await bot.answer_callback_query(query.id, "Отсканируйте qr-код на кулере")
                 return
             await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
                                                 reply_markup=InlineKeyboardMarkup())
             await bot.edit_message_text("Отправьте фотографию ответным сообщением", query.message.chat.id,
                                         query.message.id)
             await bot.answer_callback_query(query.id, "Пожалуйста, отправьте фотографию ответным сообщением")
-            codes[query.message.id] = (uid, status)
+            messages_to_reply_photo[query.message.id] = (uid, status)
         elif status.startswith("reset_") and user.admin:
             try:
                 cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
             except (InvalidId, NotFound):
                 await bot.answer_callback_query(query.id, "Произошла ошибка")
                 return
+
             keyboard = query.message.reply_markup.keyboard
+
             match status:
                 case "reset_water":
                     if len(keyboard[0]) == 2:
@@ -320,25 +318,22 @@ async def handle_empty_select(query: CallbackQuery):
                     cooler.empty_glass = False
                     cooler.empty_watter = False
 
-            if len(keyboard) == 2:
-                await bot.delete_message(query.message.chat.id, query.message.id)
-            else:
-                await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
-                                                    reply_markup=InlineKeyboardMarkup(keyboard))
-
             for i, j in cooler.sent_messages:
-                if i == query.message.chat.id and j == query.message.id:
-                    continue
-                if len(keyboard) == 2:
-                    await antiflood(bot.delete_message, i, j)
-                else:
-                    await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=InlineKeyboardMarkup(keyboard))
+                try:
+                    if len(keyboard) == 2:
+                        await antiflood(bot.delete_message, i, j)
+                    else:
+                        await antiflood(bot.edit_message_reply_markup, i, j,
+                                        reply_markup=InlineKeyboardMarkup(keyboard))
+                except ApiTelegramException as e:
+                    print(e)
+                    del cooler.sent_messages[cooler.sent_messages.index([i, j])]
 
             if len(keyboard) == 2:
                 cooler.sent_messages = []
 
             await Database.coolers.save(cooler)
-            await bot.answer_callback_query(query.id)
+            await bot.answer_callback_query(query.id, "Изменения внесены")
         elif status == "ban" and user.admin:
             user_to_ban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
             if not user_to_ban:
@@ -356,14 +351,18 @@ async def handle_empty_select(query: CallbackQuery):
             keyboard = query.message.reply_markup.keyboard
             keyboard[-2][0] = InlineKeyboardButton(f"Взялся: @{query.from_user.username}", callback_data="empty")
             for i, j in cooler.sent_messages:
-                await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=InlineKeyboardMarkup(keyboard))
+                try:
+                    await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=InlineKeyboardMarkup(keyboard))
+                except ApiTelegramException as e:
+                    print(e)
+                    del cooler.sent_messages[cooler.sent_messages.index([i, j])]
+            await Database.coolers.save(cooler)
             await bot.answer_callback_query(query.id)
         else:
             await bot.answer_callback_query(query.id)
     except Exception as e:
         print(e)
         await bot.answer_callback_query(query.id, "Произошла ошибка")
-    pass
 
 
 async def main():
