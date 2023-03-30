@@ -14,9 +14,9 @@ from telebot.asyncio_helper import ApiTelegramException
 # noinspection PyPackageRequirements
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 # noinspection PyPackageRequirements
-from telebot.util import extract_arguments, antiflood
+from telebot.util import extract_arguments, antiflood, extract_command
 
-from database import Database
+from database import Database, get_user_from_msg
 from database.models import User, Event
 from utils import SelfCleaningDict
 from utils.middlewares import RegisterMiddleware, HandleBannedMiddleware
@@ -32,126 +32,130 @@ bot.setup_middleware(RegisterMiddleware())  # Настройка промежу�
 bot.setup_middleware(HandleBannedMiddleware(bot))  # Настройка промежуточного шлюза для проверки бана
 
 
-@bot.message_handler(commands=["ban"])
+# Обработка команд для бана/разбана пользователей
+@bot.message_handler(commands=["ban", "unban"])
 async def handle_ban(message: Message):
-    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-    if user.banned:
-        await bot.reply_to(message, "Вы находитесь в черном списке")
+    user = await get_user_from_msg(message)
+
+    if not user.admin:  # Проверяем является ли пользователь админом
         return
-    if not user.admin:
-        return
-    uid = extract_arguments(message.text)
-    if not uid:
-        await bot.reply_to(message, "Использование: /ban id")
-        return
-    if not uid.isdigit():
-        await bot.reply_to(message, "Использование: /ban id")
-        return
-    user_to_ban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
-    if not user_to_ban:
-        await bot.reply_to(message, "Пользователь не найден")
-        return
-    user_to_ban[0].banned = True
-    await Database.users.save(user_to_ban[0])
-    await bot.reply_to(message, "Пользователь внесен в черный список")
+
+    try:
+        uid = int(extract_arguments(message.text))  # Добываем id пользователя, которого нужно изменить
+        try:
+            # Изменяем информацию в БД
+            await Database.users.update_one({
+                "telegram_id": uid
+            }, update={
+                "$set": {
+                    "banned": extract_command(message.text) == "ban"
+                }
+            })
+
+            await bot.reply_to(message, f"Изменения произведены\nId пользователя: {uid}")  # Оповещаем пользователя
+        except NotFound:
+            # В БД не найден пользователь, которого нужно изменить
+            await bot.reply_to(message, "Пользователь не найден")
+    except ValueError:
+        # Не передали id или передали не число
+        await bot.reply_to(message, "Использование:\n/ban id\n/unban id")
 
 
-@bot.message_handler(commands=["unban"])
-async def handle_unban(message: Message):
-    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-    if user.banned:
-        await bot.reply_to(message, "Вы находитесь в черном списке")
-        return
-    if not user.admin:
-        return
-    uid = extract_arguments(message.text)
-    if not uid:
-        await bot.reply_to(message, "Использование: /unban id")
-        return
-    if not uid.isdigit():
-        await bot.reply_to(message, "Использование: /ban id")
-        return
-    user_to_unban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
-    if not user_to_unban:
-        await bot.reply_to(message, "Пользователь не найден")
-        return
-    user_to_unban[0].banned = True
-    await Database.users.save(user_to_unban[0])
-    await bot.reply_to(message, "Пользователь внесен в черный список")
-
-
+# Обработка редактирования администраторов
 @bot.message_handler(commands=["admin"])
-async def handle_unban(message: Message):
-    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-    if user.banned:
-        await bot.reply_to(message, "Вы находитесь в черном списке")
+async def handle_admin(message: Message):
+    user = await get_user_from_msg(message)
+
+    if not user.can_add_admin:  # Проверяем может ли пользователь изменять админов
         return
-    if not user.can_add_admin:
-        return
-    s = extract_arguments(message.text)
-    if s:
-        s = s.split()
-        if len(s) == 2:
-            if s[0].isdigit():
-                user = await Database.users.find({"telegram_id": int(s[0])}, inject_default_id=True)
-                if user:
-                    user = user[0]
-                    if s[1].lower() == "true":
-                        user.admin = True
-                        user.send_notif = True
-                        await Database.users.save(user)
-                        await bot.reply_to(message, "Админ добавлен")
-                        return
-                    if s[1].lower() == "false":
-                        user.admin = False
-                        user.send_notif = False
-                        await Database.users.save(user)
-                        await bot.reply_to(message, "Админ удален")
-                        return
-        if len(s) == 1:
-            if s[0].lower() in ["true", "false"]:
+
+    try:
+        arguments = extract_arguments(message.text).split()
+        match len(arguments):
+            case 2:
+                if not arguments[0].isdigit() or arguments[1] not in ["true", "false"]:
+                    raise ValueError
+
+                await Database.users.update_one({
+                    "telegram_id": int(arguments[0])
+                }, update={
+                    "$set": {
+                        "admin": arguments[1] == "true",
+                        "send_notif": arguments[1] == "true"
+                    }
+                })
+                await bot.reply_to(message, f"Изменения произведены\nId пользователя: {arguments[0]}")
+            case 1:
+                if arguments[0] not in ["true", "false"]:
+                    raise ValueError
+
                 await bot.reply_to(message, "Перешлите сообщение от пользователя")
-                admins_actions[message.from_user.id] = s[0].lower()
-                return
-    await bot.reply_to(message, "Использование: /admin id true|false")
+                admins_actions[message.from_user.id] = arguments[0]
+            case _:
+                raise ValueError
+    except (AttributeError, ValueError):
+        await bot.reply_to(message, "Использование: /admin id true|false")
 
 
+# Обработка редактирования администраторов через пересланное сообщение
 @bot.message_handler(func=lambda message: message.forward_from is not None)
-async def handle_forwarded(message: Message):
-    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-    if user.banned:
-        await bot.reply_to(message, "Вы находитесь в черном списке")
+async def handle_forwarded_for_admin(message: Message):
+    user = await get_user_from_msg(message)
+
+    if not user.can_add_admin:  # Проверяем может ли пользователь изменять админов
         return
-    if not user.can_add_admin:
+
+    if message.from_user.id not in admins_actions.keys():  # Проверяем запрашивал ли пользователь действия
         return
-    if not message.forward_from:
-        return
-    if message.from_user.id not in admins_actions.keys():
-        return
-    user_to_edit = await Database.users.find({"telegram_id": message.forward_from.id}, inject_default_id=True)
+
+    # Находим пользователя, если нет, то создаём
+    user_to_edit = await Database.users.find({
+        "telegram_id": message.forward_from.id
+    }, inject_default_id=True)
     if user_to_edit:
         user_to_edit = user_to_edit[0]
     else:
         user_to_edit = User(telegram_id=message.forward_from.id, name=message.forward_from.first_name)
-    if admins_actions[message.from_user.id] == "true":
-        user_to_edit.admin = True
-        user_to_edit.send_notif = True
-    else:
-        user_to_edit.admin = False
-        user_to_edit.send_notif = False
+
+    # Вносим изменения
+    user_to_edit.admin = admins_actions[message.from_user.id] == "true"
+    user_to_edit.send_notif = admins_actions[message.from_user.id] == "true"
+
+    # Отмечаем действие выполненным, сохраняем БД, отправляем уведомление
     del admins_actions[message.from_user.id]
     await Database.users.save(user_to_edit)
     await bot.reply_to(message, f"Изменения произведены\nId пользователя: {message.forward_from.id}")
 
 
+# Обрабатываем начало диалога
 @bot.message_handler(commands=['start'])
 async def handle_start(message: Message):
     uid = extract_arguments(message.text)
-    if uid and len(uid) == 24:
-        user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-        if user.banned:
-            await bot.reply_to(message, "Вы находитесь в черном списке")
+    try:
+        cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
+
+        if cooler.empty_glass and cooler.empty_watter:  # Уведомляем, что мы уже знаем об отсутствии всего
+            await bot.reply_to(message, "Отсутствие воды и стаканчиков уже зарегистрировано")
             return
+
+        if cooler.empty_glass:  # Уведомляем, что мы уже знаем об отсутствии чего-то одного
+            await bot.reply_to(message, "Отсутствие стаканчиков уже зарегистрировано")
+        elif cooler.empty_watter:
+            await bot.reply_to(message, "Отсутствие воды уже зарегистрировано")
+
+        # inline клавиатура для отправки обращений
+        keyboard = InlineKeyboardMarkup().row(
+            InlineKeyboardButton("Нет стаканчиков", callback_data=f"{uid} no_glass"),
+            InlineKeyboardButton("Нет воды", callback_data=f"{uid} no_water")
+        ).row(
+            InlineKeyboardButton("Нет стаканчиков и воды", callback_data=f"{uid} no_all")
+        )
+        await bot.reply_to(message, "Выберите, чего не хватает", reply_markup=keyboard)
+    except (AssertionError, InvalidId, NotFound):
+        # Пользователь использовал команду /start не через qr-код
+        await bot.reply_to(message, "Отсканируйте qr-код на кулере")
+
+    if uid and len(uid) == 24:
         try:
             cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
         except (InvalidId, NotFound):
@@ -177,110 +181,144 @@ async def handle_start(message: Message):
         await bot.reply_to(message, "Отсканируйте qr-код на кулере")
 
 
+# Обработка отправленной фотографии
 @bot.message_handler(content_types=["photo"])
 async def photo_handler(message: Message):
-    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
-    if user.banned:
-        await bot.reply_to(message, "Вы находитесь в черном списке")
+    if not message.photo or not message.reply_to_message:  # Проверяем, что сообщение — ответ и фотография
         return
-    if message.photo and message.reply_to_message:
-        messages_to_reply_photo.prone()
-        try:
-            uid, status = messages_to_reply_photo[message.reply_to_message.id]
-            del messages_to_reply_photo[message.reply_to_message.id]
-        except KeyError:
-            await bot.reply_to(message, "Попробуйте отсканировать код еще раз")
-            return
 
-        try:
-            cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
-        except (InvalidId, NotFound):
-            await bot.reply_to(message, "Отсканируйте qr-код на кулере")
-            return
+    # Смотрим, какую кнопку нажал пользователь
+    messages_to_reply_photo.prone()
+    try:
+        uid, status = messages_to_reply_photo[message.reply_to_message.id]
+        del messages_to_reply_photo[message.reply_to_message.id]
+    except KeyError:
+        await bot.reply_to(message, "Попробуйте отсканировать код еще раз")
+        return
 
-        keyboard = InlineKeyboardMarkup()
+    try:
+        cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
+    except (InvalidId, NotFound):
+        await bot.reply_to(message, "Отсканируйте qr-код на кулере")
+        return
 
-        match status:
-            case "no_water":
-                if cooler.empty_watter:
-                    await bot.reply_to(message, "Обращение уже зарегистрировано")
-                    return
-                m = "Закончилась вода в кулере: "
-                cooler.empty_watter = True
-                keyboard.row(InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water"))
-            case "no_glass":
-                if cooler.empty_glass:
-                    await bot.reply_to(message, "Обращение уже зарегистрировано")
-                    return
-                m = "Закончились стаканчики в кулере: "
-                cooler.empty_glass = True
-                keyboard.row(InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"))
-            case "no_all":
-                if cooler.empty_watter and cooler.empty_glass:
-                    await bot.reply_to(message, "Обращение уже зарегистрировано")
-                    return
-                m = "Закончились стаканчики и вода в кулере: "
-                cooler.empty_glass = True
-                cooler.empty_watter = True
-                keyboard \
-                    .row(InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"),
-                         InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water")) \
-                    .row(InlineKeyboardButton("Вода и cтаканчики загружены", callback_data=f"{uid} reset_all"))
-            case _:
-                await bot.reply_to(message, "Произошла ошибка")
+    keyboard = InlineKeyboardMarkup()
+
+    match status:
+        case "no_water":
+            if cooler.empty_watter:
+                await bot.reply_to(message, "Обращение уже зарегистрировано")
                 return
+            m = "Закончилась вода в кулере: "
+            cooler.empty_watter = True
+            keyboard.row(InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water"))
+        case "no_glass":
+            if cooler.empty_glass:
+                await bot.reply_to(message, "Обращение уже зарегистрировано")
+                return
+            m = "Закончились стаканчики в кулере: "
+            cooler.empty_glass = True
+            keyboard.row(InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"))
+        case "no_all":
+            if cooler.empty_watter and cooler.empty_glass:
+                await bot.reply_to(message, "Обращение уже зарегистрировано")
+                return
+            m = "Закончились стаканчики и вода в кулере: "
+            cooler.empty_glass = True
+            cooler.empty_watter = True
+            keyboard.row(
+                InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"),
+                InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water")
+            ).row(
+                InlineKeyboardButton("Вода и cтаканчики загружены", callback_data=f"{uid} reset_all")
+            )
+        case _:
+            await bot.reply_to(message, "Ты как сюда попал?\nНапиши @pihta24")
+            return
 
-        if len(cooler.sent_messages) != 0:
-            keyboard = InlineKeyboardMarkup()
-            keyboard \
-                .row(InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"),
-                     InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water")) \
-                .row(InlineKeyboardButton("Вода и cтаканчики загружены", callback_data=f"{uid} reset_all"))
+    # Если уже есть нерешенные задачи, значит кулер пустой
+    if len(cooler.sent_messages) != 0:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.row(
+            InlineKeyboardButton("Стаканчики загружены", callback_data=f"{uid} reset_glass"),
+            InlineKeyboardButton("Вода загружена", callback_data=f"{uid} reset_water")
+        ).row(
+            InlineKeyboardButton("Вода и cтаканчики загружены", callback_data=f"{uid} reset_all")
+        )
 
-        m += f"'{cooler.name}'\nОтправил @{message.from_user.username}, id: {message.from_user.id}"
-        keyboard.row(InlineKeyboardButton("Взялся за работу", callback_data=f"{uid} take"))
-        keyboard.row(InlineKeyboardButton("Забанить", callback_data=f"{message.from_user.id} ban"))
+    m += f"'{cooler.name}'\nОтправил @{message.from_user.username}, id: {message.from_user.id}"
+    keyboard.row(InlineKeyboardButton("Взялся за работу", callback_data=f"{uid} take"))
+    keyboard.row(InlineKeyboardButton("Забанить", callback_data=f"{message.from_user.id} ban"))
 
-        if len(cooler.sent_messages) != 0:
-            for i, j in enumerate(cooler.sent_messages):
-                try:
-                    await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=keyboard)
-                except ApiTelegramException as e:
-                    print(e)
-                    del cooler.sent_messages[cooler.sent_messages.index([i, j])]
-
-        for i in await Database.users.find({"send_notif": True}, inject_default_id=True):
+    if len(cooler.sent_messages) != 0:
+        for i, j in enumerate(cooler.sent_messages):
             try:
-                msg = await antiflood(bot.send_photo, i.telegram_id, message.photo[0].file_id, m, reply_markup=keyboard)
-                cooler.sent_messages.append([msg.chat.id, msg.id])
+                await antiflood(bot.edit_message_reply_markup, i, j, reply_markup=keyboard)
             except ApiTelegramException as e:
                 print(e)
-                i.send_notif = False
-                await Database.users.save(i)
+                del cooler.sent_messages[cooler.sent_messages.index([i, j])]
 
-        await Database.coolers.save(cooler)
-        await Database.events.save(Event(type=status, from_id=message.from_user.id,
-                                         description=f"@{message.from_user.username} sent {status} event"))
+    for i in await Database.users.find({"send_notif": True}, inject_default_id=True):
+        try:
+            msg = await antiflood(bot.send_photo, i.telegram_id, message.photo[0].file_id, m, reply_markup=keyboard)
+            cooler.sent_messages.append([msg.chat.id, msg.id])
+        except ApiTelegramException as e:
+            print(e)
+            i.send_notif = False
+            await Database.users.save(i)
 
-        await bot.reply_to(message, "Спасибо за обращение")
+    await Database.coolers.save(cooler)
+    await Database.events.save(
+        Event(
+            type=status,
+            from_id=message.from_user.id,
+            description=f"@{message.from_user.username} sent {status} event"
+        )
+    )
+
+    await bot.reply_to(message, "Спасибо за обращение")
 
 
+# Обрабатываем все запросы от inline кнопок
 @bot.callback_query_handler(lambda query: query.message is not None)
 async def handle_inline_keyboard(query: CallbackQuery):
     user = await Database.users.find_one({"telegram_id": query.message.chat.id}, inject_default_id=True)
-    if user.banned:
+    if user.banned:  # Проверяем, не в бане ли пользователь
         await bot.answer_callback_query(query.id, "Вы находитесь в черном списке")
         return
+
+    # Ловим все ошибки, чтобы не крутилась загрузка у пользователя, если упадёт
     try:
-        if query.data == "empty":
+        if query.data == "empty":  # Заглушка для кнопок, которые просто показывают информацию
             await bot.answer_callback_query(query.id)
             return
+
         uid, status = query.data.split()
         if status.startswith("no_"):
             try:
-                await Database.coolers.find_one(_id=uid, inject_default_id=True)
+                cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
             except (InvalidId, NotFound):
                 await bot.answer_callback_query(query.id, "Отсканируйте qr-код на кулере")
+                await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
+                                                    reply_markup=InlineKeyboardMarkup())
+                await bot.edit_message_text("Отсканируйте qr-код на кулере", query.message.chat.id,
+                                            query.message.id)
+                return
+            if status not in ["no_water", "no_glass", "no_all"]:
+                await bot.answer_callback_query(query.id, "Отсканируйте qr-код на кулере")
+                await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
+                                                    reply_markup=InlineKeyboardMarkup())
+                await bot.edit_message_text("Отсканируйте qr-код на кулере", query.message.chat.id,
+                                            query.message.id)
+                return
+            if (status == "no_water" and cooler.empty_watter) or \
+                    (status == "no_glass" and cooler.empty_glass) or \
+                    (status == "no_all" and cooler.empty_watter and cooler.empty_glass):
+                await bot.answer_callback_query(query.id, "Обращение уже зарегистрировано")
+                await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
+                                                    reply_markup=InlineKeyboardMarkup())
+                await bot.edit_message_text("Обращение уже зарегистрировано", query.message.chat.id,
+                                            query.message.id)
                 return
             await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
                                                 reply_markup=InlineKeyboardMarkup())
@@ -359,10 +397,11 @@ async def handle_inline_keyboard(query: CallbackQuery):
             await Database.coolers.save(cooler)
             await bot.answer_callback_query(query.id)
         else:
-            await bot.answer_callback_query(query.id)
+            await bot.answer_callback_query(
+                query.id, "Теоретически, ты не можешь это видеть, но, похоже, мы что-то забыли\nНапиши @pihta24")
     except Exception as e:
         print(e)
-        await bot.answer_callback_query(query.id, "Произошла ошибка")
+        await bot.answer_callback_query(query.id, "Произошла ошибка\nКаким образом ты все сломал?\nНапиши @pihta24")
 
 
 async def main():
