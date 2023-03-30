@@ -155,31 +155,6 @@ async def handle_start(message: Message):
         # Пользователь использовал команду /start не через qr-код
         await bot.reply_to(message, "Отсканируйте qr-код на кулере")
 
-    if uid and len(uid) == 24:
-        try:
-            cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
-        except (InvalidId, NotFound):
-            await bot.reply_to(message, "Отсканируйте qr-код на кулере")
-            return
-        if cooler.empty_glass and cooler.empty_watter:
-            await bot.reply_to(message, "Отсутствие воды и стаканчиков уже зарегистрировано")
-            return
-        keyboard = InlineKeyboardMarkup()
-        if cooler.empty_glass:
-            await bot.reply_to(message, "Отсутствие стаканчиков уже зарегистрировано")
-            keyboard.row(InlineKeyboardButton("Нет воды", callback_data=f"{uid} no_water"))
-        elif cooler.empty_watter:
-            await bot.reply_to(message, "Отсутствие воды уже зарегистрировано")
-            keyboard.row(InlineKeyboardButton("Нет стаканчиков", callback_data=f"{uid} no_glass"))
-        else:
-            keyboard \
-                .row(InlineKeyboardButton("Нет стаканчиков", callback_data=f"{uid} no_glass"),
-                     InlineKeyboardButton("Нет воды", callback_data=f"{uid} no_water")) \
-                .row(InlineKeyboardButton("Нет стаканчиков и воды", callback_data=f"{uid} no_all"))
-        await bot.reply_to(message, "Выберите, чего не хватает", reply_markup=keyboard)
-    else:
-        await bot.reply_to(message, "Отсканируйте qr-код на кулере")
-
 
 # Обработка отправленной фотографии
 @bot.message_handler(content_types=["photo"])
