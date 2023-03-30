@@ -51,16 +51,44 @@ bot.setup_middleware(Middleware())
 
 @bot.message_handler(commands=["ban"])
 async def handle_ban(message: Message):
-    print(message)
-    # TODO: Banning user
-    pass
+    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
+    if user.banned:
+        await bot.reply_to(message, "Вы находитесь в черном списке")
+        return
+    if not user.admin:
+        return
+    uid = extract_arguments(message.text)
+    if not uid:
+        await bot.reply_to(message, "Использование: /ban id")
+        return
+    user_to_ban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
+    if not user_to_ban:
+        await bot.reply_to(message, "Пользователь не найден")
+        return
+    user_to_ban[0].banned = True
+    await Database.users.save(user_to_ban[0])
+    await bot.reply_to(message, "Пользователь внесен в черный список")
 
 
 @bot.message_handler(commands=["unban"])
 async def handle_unban(message: Message):
-    print(message)
-    # TODO: Unbanning user
-    pass
+    user = await Database.users.find_one({"telegram_id": message.from_user.id}, inject_default_id=True)
+    if user.banned:
+        await bot.reply_to(message, "Вы находитесь в черном списке")
+        return
+    if not user.admin:
+        return
+    uid = extract_arguments(message.text)
+    if not uid:
+        await bot.reply_to(message, "Использование: /unban id")
+        return
+    user_to_unban = await Database.users.find({"telegram_id": int(uid)}, inject_default_id=True)
+    if not user_to_unban:
+        await bot.reply_to(message, "Пользователь не найден")
+        return
+    user_to_unban[0].banned = True
+    await Database.users.save(user_to_unban[0])
+    await bot.reply_to(message, "Пользователь внесен в черный список")
 
 
 @bot.message_handler(commands=["admin"])
@@ -70,7 +98,6 @@ async def handle_unban(message: Message):
         await bot.reply_to(message, "Вы находитесь в черном списке")
         return
     if not user.can_add_admin:
-        await bot.reply_to(message, "Вы не можете изменять администраторов")
         return
     s = extract_arguments(message.text)
     if s:
