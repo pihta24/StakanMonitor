@@ -32,6 +32,11 @@ bot.setup_middleware(RegisterMiddleware())  # Настройка промежу�
 bot.setup_middleware(HandleBannedMiddleware(bot))  # Настройка промежуточного шлюза для проверки бана
 
 
+@bot.message_handler(commands=["coolers"])
+async def handle_coolers(message: Message):
+    pass
+
+
 # Обработка команд для бана/разбана пользователей
 @bot.message_handler(commands=["ban", "unban"])
 async def handle_ban(message: Message):
@@ -381,7 +386,7 @@ async def handle_inline_keyboard(query: CallbackQuery):
 
 async def main():
     await Engine().bind(motor=client, databases=[Database], inject_motyc_fields=True)
-    await bot.polling()
+    await bot.polling(non_stop=True)
 
 
 if __name__ == '__main__':
