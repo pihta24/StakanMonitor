@@ -52,7 +52,7 @@ async def handle_coolers(message: Message):
         case 1:
             if args[0] == "qr":
                 for i in coolers:
-                    await antiflood(bot.send_document, message.chat.id, generate_qr_code(i._id), caption=i.name)
+                    await antiflood(bot.send_document, message.chat.id, generate_qr_code(str(i._id)), caption=i.name, visible_file_name="qr.png")
 
 
 # Обработка команд для бана/разбана пользователей
