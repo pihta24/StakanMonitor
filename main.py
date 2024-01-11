@@ -18,7 +18,7 @@ from telebot.util import extract_arguments, antiflood, extract_command
 
 from database import Database, get_user_from_msg
 from database.models import User, Event
-from utils import SelfCleaningDict
+from utils import SelfCleaningDict, generate_qr_code
 from utils.middlewares import RegisterMiddleware, HandleBannedMiddleware
 
 # Создание клиентов для БД и телеги
@@ -38,6 +38,21 @@ async def handle_coolers(message: Message):
 
     if not user.admin:
         return
+
+    coolers = await Database.coolers.find({}, inject_default_id=True)
+
+    if not coolers:
+        await bot.reply_to(message, "Кулеров нет")
+        return
+    args = extract_arguments(message.text).split()
+
+    match len(args):
+        case 0:
+            await bot.reply_to(message, "\n".join([f"{i.name} - {i._id}" for i in coolers]))
+        case 1:
+            if args[0] == "qr":
+                for i in coolers:
+                    await antiflood(bot.send_document, message.chat.id, generate_qr_code(i._id), caption=i.name)
 
 
 # Обработка команд для бана/разбана пользователей
@@ -88,7 +103,7 @@ async def handle_chat(message: Message):
                     raise ValueError
 
                 await Database.chats.update_one({
-                    "telegram_id": message.chat.id
+                    "chat_id": message.chat.id
                 }, update={
                     "$set": {
                         "send_notif": arguments[0] == "true"
@@ -325,7 +340,7 @@ async def photo_handler(message: Message):
 @bot.callback_query_handler(lambda query: query.message is not None)
 async def handle_inline_keyboard(query: CallbackQuery):
     if query.message.chat.type != "private":
-        from_chat = await Database.chats.find_one(_id=query.message.chat.id, inject_default_id=True)
+        from_chat = await Database.chats.find_one({"chat_id": query.message.chat.id}, inject_default_id=True)
         if not from_chat or not from_chat.send_notif:
             from_chat = None
     else:

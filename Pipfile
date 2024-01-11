@@ -7,9 +7,10 @@ name = "pypi"
 pytelegrambotapi = "*"
 aiorun = "*"
 aiohttp = "*"
-pydantic = "*"
+pydantic = "<2.0.0"
 pymotyc = "*"
 motor = "*"
+qrcode = {extras = ["pil"], version = "*"}
 
 [dev-packages]
 
