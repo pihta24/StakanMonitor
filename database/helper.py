@@ -10,6 +10,7 @@ class Database:
     coolers: Collection[Cooler]
     users: Collection[User]
     events: Collection[Event]
+    chats: Collection[Chat]
 
 
 def get_user_from_msg(message):
