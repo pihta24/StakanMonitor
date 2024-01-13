@@ -17,7 +17,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from telebot.util import extract_arguments, antiflood, extract_command
 
 from database import Database, get_user_from_msg
-from database.models import User, Event
+from database.models import User, Event, Cooler
 from utils import SelfCleaningDict, generate_qr_code
 from utils.middlewares import RegisterMiddleware, HandleBannedMiddleware
 
@@ -39,20 +39,51 @@ async def handle_coolers(message: Message):
     if not user.admin:
         return
 
-    coolers = await Database.coolers.find({}, inject_default_id=True)
-
-    if not coolers:
-        await bot.reply_to(message, "Кулеров нет")
-        return
     args = extract_arguments(message.text).split()
 
     match len(args):
         case 0:
+            coolers = await Database.coolers.find({}, inject_default_id=True)
+
+            if not coolers:
+                await bot.reply_to(message, "Кулеров нет")
+                return
             await bot.reply_to(message, "\n".join([f"{i.name} - {i._id}" for i in coolers]))
         case 1:
-            if args[0] == "qr":
-                for i in coolers:
-                    await antiflood(bot.send_document, message.chat.id, generate_qr_code(str(i._id)), caption=i.name, visible_file_name="qr.png")
+            match args[0]:
+                case "qr":
+                    coolers = await Database.coolers.find({}, inject_default_id=True)
+
+                    if not coolers:
+                        await bot.reply_to(message, "Кулеров нет")
+                        return
+                    for i in coolers:
+                        await antiflood(bot.send_document, message.chat.id, generate_qr_code(str(i._id)), caption=i.name, visible_file_name="qr.png")
+                case _:
+                    try:
+                        cooler = await Database.coolers.find_one(_id=str(args[0]), inject_default_id=True)
+                    except (InvalidId, NotFound):
+                        await bot.reply_to(message, "Кулер не найден")
+                        return
+                    await bot.send_document(message.chat.id, generate_qr_code(str(cooler._id)), caption=cooler.name, visible_file_name="qr.png")
+        case 2:
+            match args[0]:
+                case "delete":
+                    try:
+                        await Database.coolers.find_one(_id=str(args[1]), inject_default_id=True)
+                    except (InvalidId, NotFound):
+                        await bot.reply_to(message, "Кулер не найден")
+                        return
+                    await Database.coolers.delete_one(_id=str(args[1]))
+                    await bot.reply_to(message, "Кулер удален")
+                case "add":
+                    cooler = await Database.coolers.save(Cooler(name=str(args[1])), inject_default_id=True)
+                    await bot.send_document(message.chat.id, generate_qr_code(str(cooler._id)), caption=f"", visible_file_name="qr.png")
+                case _:
+                    await bot.reply_to(message, "Использование:\n/coolers\n/coolers qr\n/coolers id\n/coolers delete id\n/coolers add name")
+        case _:
+            await bot.reply_to(message, "Использование:\n/coolers\n/coolers qr\n/coolers id\n/coolers delete id\n/coolers add name")
+
 
 
 # Обработка команд для бана/разбана пользователей
@@ -325,7 +356,7 @@ async def photo_handler(message: Message):
         Event(
             type=status,
             from_id=message.from_user.id,
-            description=f"@{message.from_user.username} sent {status} event"
+            description=f"@{message.from_user.username} sent {status} event cooler {cooler._id}"
         )
     )
 
