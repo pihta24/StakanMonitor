@@ -25,7 +25,7 @@ from utils.middlewares import RegisterMiddleware, HandleBannedMiddleware
 bot = AsyncTeleBot(environ.get("TELEBOT_TOKEN", ""))
 client = AsyncIOMotorClient(environ.get("DATABASE_URL", ""))
 
-messages_to_reply_photo = SelfCleaningDict(3600, 3600)  # Самоочищающийся словарь для хранения типа отсутствия в диалоге
+chat_to_get_photo = SelfCleaningDict(3600, 3600)  # Самоочищающийся словарь для хранения типа отсутствия в диалоге
 admins_actions = {}  # Словарь для хранения действий с админами для чатов
 
 bot.setup_middleware(RegisterMiddleware())  # Настройка промежуточного шлюза для регистрации пользователей
@@ -231,15 +231,11 @@ async def photo_handler(message: Message):
     if not message.photo:  # Проверяем, что сообщение — фотография
         return
 
-    if not message.reply_to_message:  # Проверяем, что сообщение — ответ
-        await bot.reply_to(message, "Ответьте на сообщение от бота(свайп влево)")
-        return
-
     # Смотрим, какую кнопку нажал пользователь
-    messages_to_reply_photo.prone()
+    chat_to_get_photo.prone()
     try:
-        uid, status = messages_to_reply_photo[message.reply_to_message.id]
-        del messages_to_reply_photo[message.reply_to_message.id]
+        uid, status = chat_to_get_photo[message.from_user.id]
+        del chat_to_get_photo[message.from_user.id]
     except KeyError:
         await bot.reply_to(message, "Попробуйте отсканировать код еще раз")
         return
@@ -390,13 +386,13 @@ async def handle_inline_keyboard(query: CallbackQuery):
                 finally:
                     return
             try:
-                await bot.answer_callback_query(query.id, "Пожалуйста, отправьте фотографию ответным сообщением")
+                await bot.answer_callback_query(query.id, "Пожалуйста, отправьте фотографию")
                 await bot.edit_message_reply_markup(query.message.chat.id, query.message.id,
                                                     reply_markup=InlineKeyboardMarkup())
-                await bot.edit_message_text("Отправьте фотографию ответным сообщением", query.message.chat.id,
+                await bot.edit_message_text("Отправьте фотографию", query.message.chat.id,
                                             query.message.id)
             finally:
-                messages_to_reply_photo[query.message.id] = (uid, status)
+                chat_to_get_photo[query.from_user.id] = (uid, status)
         elif status.startswith("reset_") and (user.admin or from_chat):
             try:
                 cooler = await Database.coolers.find_one(_id=uid, inject_default_id=True)
